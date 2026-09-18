@@ -259,7 +259,7 @@ class OpenAIModel(LLM):
             if batch_job.status in ['failed', 'expired', 'cancelled']:
                 logger.error(f"Batch job failed: {batch_job.status}")
                 raise Exception(f"Batch job {batch_job.id} failed: {batch_job.status}")
-            time.sleep(5)
+            time.sleep(30)
             batch_job = self.model.batches.retrieve(batch_job.id)
             logger.info(batch_job)
 
@@ -596,7 +596,7 @@ class GeminiModel(LLM):
             generation_max_length=generation_max_length,
             generation_min_length=generation_min_length,
             do_sample=do_sample,
-            stop_newline=stop_newline,
+            stop_new_line=stop_new_line,
             use_chat_template=use_chat_template,
             system_message=system_message,
         )
@@ -702,7 +702,7 @@ class TogetherModel(LLM):
             generation_max_length=generation_max_length,
             generation_min_length=generation_min_length,
             do_sample=do_sample,
-            stop_newline=stop_newline,
+            stop_new_line=stop_new_line,
             use_chat_template=use_chat_template,
             system_message=system_message,
         )
@@ -790,6 +790,7 @@ def tokenize(
     max_length: int,
     generation_max_length: int,
     use_chat_template: bool=False,
+    enable_thinking: bool=False,
     continue_final_message: bool=False,
     system_message: Optional[str]="You are a helpful assistant.",
 ):
@@ -800,6 +801,7 @@ def tokenize(
         assert use_chat_template
 
     def format_input(sample):
+
         if use_chat_template:
             chat = format_chat(
                 data["user_template"].format(**sample),
@@ -809,13 +811,13 @@ def tokenize(
                 chat.append({"role": "assistant", "content": data['system_template'].format(**sample)})
             try:
                 # sometimes the tokenizer doesn't support system message
-                prompt = tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=not continue_final_message, continue_final_message=continue_final_message)
+                prompt = tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=not continue_final_message, continue_final_message=continue_final_message, enable_thinking=enable_thinking)
             except Exception as e:
                 # so we exclude the system message
                 chat = format_chat(data["user_template"].format(**sample), system_message=None)
                 if continue_final_message:
                     chat.append({"role": "assistant", "content": data['system_template'].format(**sample)})
-                prompt = tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=not continue_final_message, continue_final_message=continue_final_message)
+                prompt = tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=not continue_final_message, continue_final_message=continue_final_message, enable_thinking=enable_thinking)
 
             tokenized_input = tokenizer([prompt], return_tensors="pt", add_special_tokens=False)
         else:
@@ -869,7 +871,7 @@ class HFModel(LLM):
             generation_max_length=generation_max_length,
             generation_min_length=generation_min_length,
             do_sample=do_sample,
-            stop_newline=stop_newline,
+            stop_new_line=stop_new_line,
             use_chat_template=use_chat_template,
             system_message=system_message,
         )
@@ -918,7 +920,7 @@ class HFModel(LLM):
         # use the default if possible, append if necessary
         stop_token_ids = self.model.generation_config.eos_token_id
         stop_token_ids = [stop_token_ids] if not isinstance(stop_token_ids, list) else stop_token_ids
-        if stop_newline:
+        if stop_new_line:
             stop = list(set(["\n", "Ċ", "ĊĊ", "<0x0A>"]))
             stop_token_ids = list(set([self.tokenizer.convert_tokens_to_ids(stop_token) for stop_token in stop] + stop_token_ids))
             if "llama" in model_name.lower():
@@ -1022,6 +1024,7 @@ class VLLMModel(LLM):
         stop_new_line=False,
         use_chat_template=False,
         system_message=None,
+        thinking=False,
         seed=42,
     ):
         super().__init__(
@@ -1040,17 +1043,36 @@ class VLLMModel(LLM):
         from vllm import LLM
         # at the time of testing: note that the max model length is derived from the config file, and if max_length is larger than that length, there will be an error. it appears that vllm does not support positional extrapolation
         # there are some work arounds to this, but it may give unexpected results.
-        self.model = LLM(
-            model_name,
-            tensor_parallel_size=torch.cuda.device_count(),
-            dtype="bfloat16",
-            trust_remote_code=True,
-            enforce_eager=True,
-            seed=seed,
-            #max_seq_len_to_capture=max_length, # we cannot set unless we are using a constant max length for the run
-            max_model_len=max_length,
-        )
+        if "Qwen3" in model_name: 
+            self.model = LLM(
+                model_name,
+                tensor_parallel_size=torch.cuda.device_count(),
+                dtype="bfloat16",
+                trust_remote_code=True,
+                enforce_eager=True,
+                seed=seed,
+                hf_overrides={ "rope_scaling": {
+                    "rope_type": "yarn",
+                    "factor": 4.0,
+                    "original_max_position_embeddings": 32768
+                    }
+                },
+                #max_seq_len_to_capture=max_length, # we cannot set unless we are using a constant max length for the run
+                max_model_len=max_length,
+            )
+        else:
+            self.model = LLM(
+                model_name,
+                tensor_parallel_size=torch.cuda.device_count(),
+                dtype="bfloat16",
+                trust_remote_code=True,
+                enforce_eager=True,
+                seed=seed,
+                #max_seq_len_to_capture=max_length, # we cannot set unless we are using a constant max length for the run
+                max_model_len=max_length,
+            )            
         self.tokenizer = self.model.get_tokenizer()
+        self.thinking = thinking
 
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -1058,6 +1080,7 @@ class VLLMModel(LLM):
 
 
     def prepare_inputs(self, test_item, data):
+        
         return tokenize(
             test_item,
             data,
@@ -1066,6 +1089,7 @@ class VLLMModel(LLM):
             generation_max_length=self.generation_max_length,
             use_chat_template=self.use_chat_template,
             system_message=self.system_message,
+            enable_thinking=self.thinking,
         )
 
 
@@ -1115,7 +1139,7 @@ class VLLMModel(LLM):
                 inputs = [self.tokenizer(p, truncation=True, max_length=self.max_length - self.generation_max_length, return_tensors='pt') for p in prompt]
             end_time = time.time()
             logger.info(f"Finished preparing inputs for {len(inputs)} samples in {end_time - start_time} seconds")
-
+            
         self.sampling_params = SamplingParams(
             temperature = self.temperature if self.do_sample else 0.0,
             top_p = self.top_p,
@@ -1296,9 +1320,10 @@ def load_LLM(args):
         generation_max_length=args.generation_max_length,
         generation_min_length=args.generation_min_length,
         do_sample=args.do_sample,
-        stop_newline=args.stop_newline,
+        stop_new_line=args.stop_new_line,
         use_chat_template=args.use_chat_template,
         system_message=args.system_message,
+        thinking=args.thinking,
         **kwargs,
     )
 

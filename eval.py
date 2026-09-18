@@ -2,6 +2,7 @@ import os
 
 from collections import defaultdict
 import re
+import gc
 import random
 import json
 import time
@@ -13,6 +14,9 @@ from torch.utils.data import DataLoader
 
 from arguments import parse_arguments
 from model_utils import load_LLM, OpenAIModel, AnthropicModel, TgiVllmModel
+
+import subprocess
+import sys
 
 from data import (
     load_data,
@@ -26,7 +30,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-def run_test(args, model, dataset, test_file, demo_file):
+def run_test(args, dataset, test_file, demo_file):
     logger.info(f"running test on {dataset} with test {test_file} and demo {demo_file}")
     # dataset specific changes tag
     tag = args.tag
@@ -39,9 +43,20 @@ def run_test(args, model, dataset, test_file, demo_file):
         logger.info(f"{output_path} already exists, skipping...")
         return output_path
 
+    # HY: for the thinking mode, we add additional 32k tokens to allow models to generate thinking process
+    if args.thinking:
+        args.generation_max_length += 32768
+        args.input_max_length += 32768
+        args.stop_newline = False
+        logger.info(f"thinking mode, adding 32k tokens to generation and input max length, also disabling stop_newline")
+        
     random.seed(args.seed)
     data = load_data(args, dataset, test_file, demo_file)
     logger.info(f"loaded {len(data['data'])} samples from {dataset}")
+
+    model = load_LLM(args)
+    model.max_length = args.input_max_length
+    model.generation_max_length = args.generation_max_length
 
     dataloader = DataLoader(
         TestItemDataset(data, model, model.tokenizer),
@@ -64,15 +79,6 @@ def run_test(args, model, dataset, test_file, demo_file):
             continue
         all_inputs.append(inputs)
         all_input_texts.append(input_text)
-
-    # HY: for the thinking mode, we add additional 32k tokens to allow models to generate thinking process
-    if args.thinking:
-        args.generation_max_length += 32768
-        args.input_max_length += 32768
-        model.max_length = args.input_max_length
-        model.generation_max_length = args.generation_max_length
-        args.stop_newline = False
-        logger.info(f"thinking mode, adding 32k tokens to generation and input max length, also disabling stop_newline")
 
     logger.info("Running generation...")
     start_time = time.time()
@@ -105,8 +111,12 @@ def run_test(args, model, dataset, test_file, demo_file):
         if args.thinking:
             matches = re.search(r"(.*</think>)(.*)", output['output'], flags=re.DOTALL)
             if matches:
-                output["output"] = matches.group(2).strip()
                 output["thoughts"] = matches.group(1).strip()
+                output["output"] = matches.group(2).strip()
+            elif output['output'].startswith("<think>") or input_text.endswith("<think>"):
+                output["thoughts"] = output['output']
+                output["output"] = ""
+                
 
         mets, others = data['post_process'](output, test_item)
         output.update({**others, **mets})
@@ -195,7 +205,6 @@ def main():
     assert len(test_files) == len(demo_files)
 
     args.input_max_length = max(max_lengths)
-    model = load_LLM(args)
 
     for dataset, test_file, demo_file, max_length, gen_length in zip(datasets, test_files, demo_files, max_lengths, gen_lengths):
         args.datasets = dataset
@@ -203,28 +212,33 @@ def main():
         args.demo_files = demo_file
         args.input_max_length = max_length
         args.generation_max_length = gen_length
-        model.max_length = max_length
-        model.generation_max_length = gen_length
-
+        
+        
         try:
-            output_path = run_test(args, model, dataset, test_file, demo_file)
+            output_path = run_test(args, dataset, test_file, demo_file)
 
             if "alce" in dataset and not args.count_tokens and (not os.path.exists(output_path+".score") or args.overwrite):
-                import eval_alce
-                logger.info("running eval_alce.py...")
-                cli_args = ["--f", output_path]
+                logger.info("running eval_alce.py in separate process...")
+                
+                # Build command
+                cmd = [sys.executable, "eval_alce.py", "--f", output_path]
                 if not "nocite" in dataset:
-                    cli_args.append("--citations")
-                # HY: If you want to run the full ALCE evaluation, you should uncomment the following lines
-                # In HELMET, we don't use the MAUVE scores.
-                # if "asqa" in dataset:
-                #     cli_args.append("--mauve")
-                # elif "eli5" in dataset:
-                #   cli_args += ["mauve", "--claims_nli"]
-                eval_alce.main(cli_args)
+                    cmd.append("--citations")
+                
+                # Run in separate process
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                
+                if result.returncode != 0:
+                    logger.error(f"eval_alce.py failed: {result.stderr}")
+                    raise Exception(f"eval_alce.py failed with code {result.returncode}")
+                else:
+                    logger.info("eval_alce.py completed successfully")
+                    logger.info(result.stdout)
+                
+                # Process ends, memory is completely freed
+                logger.info("eval_alce process ended, memory should be freed")
 
         except Exception as e:
-            # in case we run into some kind of error
             logger.exception(e)
             logger.error(f"Error in {dataset}, continuing...")
             if args.debug:

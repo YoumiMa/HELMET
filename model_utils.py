@@ -1058,7 +1058,7 @@ class VLLMModel(LLM):
                     }
                 },
                 #max_seq_len_to_capture=max_length, # we cannot set unless we are using a constant max length for the run
-                max_model_len=max_length,
+                # max_model_len=max_length,
             )
         else:
             self.model = LLM(
@@ -1069,7 +1069,7 @@ class VLLMModel(LLM):
                 enforce_eager=True,
                 seed=seed,
                 #max_seq_len_to_capture=max_length, # we cannot set unless we are using a constant max length for the run
-                max_model_len=max_length,
+                # max_model_len=max_length,
             )            
         self.tokenizer = self.model.get_tokenizer()
         self.thinking = thinking

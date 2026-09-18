@@ -43,13 +43,6 @@ def run_test(args, dataset, test_file, demo_file):
         logger.info(f"{output_path} already exists, skipping...")
         return output_path
 
-    # HY: for the thinking mode, we add additional 32k tokens to allow models to generate thinking process
-    if args.thinking:
-        args.generation_max_length += 32768
-        args.input_max_length += 32768
-        args.stop_newline = False
-        logger.info(f"thinking mode, adding 32k tokens to generation and input max length, also disabling stop_newline")
-        
     random.seed(args.seed)
     data = load_data(args, dataset, test_file, demo_file)
     logger.info(f"loaded {len(data['data'])} samples from {dataset}")
@@ -79,6 +72,15 @@ def run_test(args, dataset, test_file, demo_file):
             continue
         all_inputs.append(inputs)
         all_input_texts.append(input_text)
+
+    # HY: for the thinking mode, we add additional 32k tokens to allow models to generate thinking process
+    if args.thinking:
+        args.generation_max_length += 32768
+        args.input_max_length += 32768
+        model.max_length = args.input_max_length
+        model.generation_max_length = args.generation_max_length
+        args.stop_new_line = False
+        logger.info(f"thinking mode, adding 32k tokens to generation and input max length, also disabling stop_new_line")
 
     logger.info("Running generation...")
     start_time = time.time()
